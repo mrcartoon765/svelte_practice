@@ -30,7 +30,6 @@
     // Elements
     let div;
     let btn;
-    let grid;
 
 	function updateDiv(dispText,scale,transTime) {
 	  text = dispText
@@ -87,7 +86,7 @@
 	<div class="flex items-center justify-center">
 		<button class="w-20 mt-2 text-2xl font-bold bg-green-300 rounded-2xl" on:click={repeat} bind:this={btn}>{btnText}</button>
 	</div>
-	<div class="grid grid-cols-3 m-2 text-center" bind:this={grid}>
+	<div class="grid grid-cols-3 m-2 text-center">
 		<div class="m-1">
 			<div>
 				<p>時間</p>
