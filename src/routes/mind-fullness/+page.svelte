@@ -86,7 +86,7 @@
 	<div class="flex items-center justify-center">
 		<button class="w-20 mt-2 text-2xl font-bold bg-green-300 rounded-2xl" on:click={repeat} bind:this={btn}>{btnText}</button>
 	</div>
-	<div class="grid grid-cols-3 m-2 text-center">
+	<div class="grid grid-cols-2 m-2 text-center">
 		<div class="m-1">
 			<div>
 				<p>時間</p>
@@ -107,7 +107,7 @@
 		</div>
 		<div class="m-3">
 			<div>
-				<p>止める</p>
+				<p>止める1</p>
 				<input class="w-10 p-1 text-center rounded-xl" type="number" min="0" max="30" bind:value={stopOne}>秒
 			</div>
 			<input class="w-20" type="range" bind:value={stopOne} min="0" max="30">
@@ -121,7 +121,7 @@
 		</div>
 		<div class="m-3 text-nowrap">
 			<div>
-				<p>止める</p>
+				<p>止める2</p>
 				<input class="w-10 p-1 text-center rounded-xl" type="number" min="0" max="30" bind:value={stopTwo}>秒
 			</div>
 			<input class="w-20" type="range" min="0" max="30" bind:value={stopTwo}>
