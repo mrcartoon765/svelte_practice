@@ -5,23 +5,32 @@
 
 <script>
 	import "../../app.css";
-	$:time = 1; 
-	$:color = 'black'; 
-	$:breathIn = 4; 
-	$:stopOne = 4; 
-	$:breathOut = 8;
-	$:stopTwo = 4;
-	$:play = false;
-	$:textSwitch = 'テキスト表示';
-	$:textBreathIn = '吸';
-	$:textStop = '止';
-	$:textBreathOut = '吐';
-	$:textOnOff = true;
-	let text = '';
-	let btnText = '開始';
-	let div;
-	let btn;
-	let grid;
+    // Time related
+    $:time = 1; 
+    $:breathIn = 4; 
+    $:stopOne = 4; 
+    $:breathOut = 8;
+    $:stopTwo = 4;
+
+    // Color related
+    $:color = 'black'; 
+
+    // Play related
+    $:play = false;
+
+    // Text related
+    $:textSwitch = 'テキスト表示';
+    $:textBreathIn = '吸';
+    $:textStop = '止';
+    $:textBreathOut = '吐';
+    $:textOnOff = true;
+    let text = '';
+    let btnText = '開始';
+
+    // Elements
+    let div;
+    let btn;
+    let grid;
 
 	function updateDiv(dispText,scale,transTime) {
 	  text = dispText
@@ -68,22 +77,18 @@
 	}
 </script>
 
-{#if !play }
-<h1>Mindfull Breathing</h1>
-{/if}
-<div class="flex items-center justify-center p-20 m-5">
+{#if !play } <h1>Mindfull Breathing</h1> {/if}
+<div class="flex items-center justify-center p-20">
 	<div class="flex items-center justify-center w-40 h-40 rounded-full" style="background: {color};" bind:this={div}>
-		{#if textOnOff }
-			<h1 class="text-4xl text-white">{text}</h1>
-		{/if}
+		{#if textOnOff } <h1 class="text-4xl text-white">{text}</h1> {/if}
 	</div>
 </div>
 {#if !play }
 	<div class="flex items-center justify-center">
 		<button class="w-20 mt-2 text-2xl font-bold bg-green-300 rounded-2xl" on:click={repeat} bind:this={btn}>{btnText}</button>
 	</div>
-	<div class="grid grid-cols-3 text-center" bind:this={grid}>
-		<div class="m-3">
+	<div class="grid grid-cols-3 m-2 text-center" bind:this={grid}>
+		<div class="m-1">
 			<div>
 				<p>時間</p>
 				<input class="w-10 text-center rounded-xl" type="number" min="1" max="90" bind:value={time}>分
