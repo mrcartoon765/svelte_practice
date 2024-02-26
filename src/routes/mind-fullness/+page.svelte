@@ -16,6 +16,7 @@
 	$:textBreathIn = '吸';
 	$:textStop = '止';
 	$:textBreathOut = '吐';
+	$:textOnOff = true;
 	let text = '';
 	let btnText = '開始';
 	let div;
@@ -27,7 +28,6 @@
 	  div.style.transform = 'scale('+scale+')';
 	  div.style.transition = 'transform ' + transTime + 's';
 	}
-
 
 	async function breeth() {
 		const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -62,11 +62,9 @@
 		updateDiv('',1,0);
 	}
 
-	function textOnOff() {
-		textBreathIn = textBreathIn === '吸' ? '' : '吸';
-		textStop = textStop === '止' ? '' : '止';
-		textBreathOut = textBreathOut === '吐' ? '' : '吐';
-		textSwitch = textSwitch === 'テキスト表示' ? 'テキスト非表示' : 'テキスト表示';
+	function textToggle() {
+		textOnOff = textOnOff ? false : true;
+		textSwitch = textOnOff ? 'テキスト表示' : 'テキスト非表示';
 	}
 </script>
 
@@ -75,7 +73,7 @@
 {/if}
 <div class="flex items-center justify-center p-20 m-5">
 	<div class="flex items-center justify-center w-40 h-40 rounded-full" style="background: {color};" bind:this={div}>
-		{#if play }
+		{#if textOnOff }
 			<h1 class="text-4xl text-white">{text}</h1>
 		{/if}
 	</div>
@@ -130,5 +128,5 @@
 		<button class="w-20 mt-2 text-2xl font-bold bg-blue-300 rounded-2xl" on:click={repeatStop}>stop</button>
 	</div>
 	<div class="flex items-center justify-center">
-		<button class="w-24 mt-24 text-xs font-bold bg-blue-300 rounded-xl" on:click={textOnOff}>{textSwitch}</button>
+		<button class="w-24 mt-24 text-xs font-bold bg-blue-300 rounded-xl" on:click={textToggle}>{textSwitch}</button>
 	</div>
