@@ -6,7 +6,8 @@
 <script>
 	import "../../app.css";
     // Time related
-    $:time = 1; 
+    $:playTime = 1; 
+	$:playTimeToMin = playTime * 60 * 1000;
     $:breathIn = 4; 
     $:stopOne = 4; 
     $:breathOut = 8;
@@ -58,7 +59,7 @@
 		while (play) {
 			await breeth();
 			const end=  new Date().getTime();
-			if(((time * 60 * 1000) <= (end - stat) * 60 / 1000) || !play) {
+			if((playTimeToMin <= end - stat) || !play) {
 				repeatStop();
 				break;
 			}
@@ -90,9 +91,9 @@
 		<div class="m-1">
 			<div>
 				<p>時間</p>
-				<input class="w-10 text-center rounded-xl" type="number" min="1" max="90" bind:value={time}>分
+				<input class="w-10 text-center rounded-xl" type="number" min="1" max="90" bind:value={playTime}>分
 			</div>
-			<input class="w-20" type="range" min="1" max="90" bind:value={time}>
+			<input class="w-20" type="range" min="1" max="90" bind:value={playTime}>
 		</div>
 		<div class="m-3">
 			<p>色</p>
