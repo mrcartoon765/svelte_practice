@@ -46,11 +46,11 @@
 	// ---- Web Worker（バックグラウンドでも止まらないタイマー） ----
 	let timerWorker = null;
 
-	// ---- BGM (アンビエントパッドを Web Audio で生成) ----
+	// ---- BGM (MP3 ファイル再生) ----
+	import bgmSrc from '../../bgm/ikoliks_aj-meditation-music-322801.mp3';
 	let bgmOn = false;
 	let bgmVolume = 0.3;
-	let audioCtx = null;
-	let bgmNodes = null;            // { master, mod, oscs, lfo, lfoGain }
+	let bgmAudio = null;            // HTMLAudioElement
 
 	onMount(() => {
 		if (typeof window === 'undefined') return;
@@ -84,7 +84,6 @@
 		}
 		if (timerWorker) { timerWorker.terminate(); timerWorker = null; }
 		stopBgm();
-		if (audioCtx) { try { audioCtx.close(); } catch {} }
 	});
 
 	/** バックグラウンドでも止まらない delay。Worker が使えない場合は通常の setTimeout */
@@ -303,70 +302,19 @@
 	}
 
 	// ---- BGM ----
-	function ensureAudioCtx() {
-		if (!audioCtx) {
-			const Ctx = window.AudioContext || window.webkitAudioContext;
-			audioCtx = new Ctx();
-		}
-		if (audioCtx.state === 'suspended') audioCtx.resume();
-	}
-
 	function startBgm() {
-		ensureAudioCtx();
-		if (bgmNodes) return;
-
-		const master = audioCtx.createGain();
-		master.gain.value = 0;
-		master.connect(audioCtx.destination);
-		// 2秒かけてフェードイン
-		master.gain.linearRampToValueAtTime(bgmVolume, audioCtx.currentTime + 2);
-
-		// スウェル用モジュレーションゲイン（LFO で音量が呼吸する）
-		const mod = audioCtx.createGain();
-		mod.gain.value = 0.65;
-		mod.connect(master);
-
-		// A マイナー系パッド: A2, E3, A3, E4
-		const freqs = [110, 164.81, 220, 329.63];
-		const oscs = freqs.map((f, i) => {
-			const o = audioCtx.createOscillator();
-			o.type = i === 0 ? 'sine' : 'triangle';
-			o.frequency.value = f;
-			// 微妙にデチューンして広がりを出す
-			o.detune.value = (i - 1.5) * 4;
-			const g = audioCtx.createGain();
-			g.gain.value = i === 0 ? 0.22 : 0.12;
-			o.connect(g).connect(mod);
-			o.start();
-			return o;
-		});
-
-		// LFO (~12 秒周期) で mod.gain を ±0.3 スウェル
-		const lfo = audioCtx.createOscillator();
-		lfo.type = 'sine';
-		lfo.frequency.value = 0.08;
-		const lfoGain = audioCtx.createGain();
-		lfoGain.gain.value = 0.3;
-		lfo.connect(lfoGain).connect(mod.gain);
-		lfo.start();
-
-		bgmNodes = { master, mod, oscs, lfo, lfoGain };
+		if (bgmAudio) return;
+		bgmAudio = new Audio(bgmSrc);
+		bgmAudio.loop = true;
+		bgmAudio.volume = bgmVolume;
+		bgmAudio.play().catch(() => {});
 	}
 
 	function stopBgm() {
-		if (!bgmNodes || !audioCtx) return;
-		const nodes = bgmNodes;
-		bgmNodes = null;
-		const now = audioCtx.currentTime;
-		try {
-			nodes.master.gain.cancelScheduledValues(now);
-			nodes.master.gain.linearRampToValueAtTime(0, now + 1);
-		} catch {}
-		setTimeout(() => {
-			try { nodes.oscs.forEach((o) => o.stop()); } catch {}
-			try { nodes.lfo.stop(); } catch {}
-			try { nodes.master.disconnect(); } catch {}
-		}, 1100);
+		if (!bgmAudio) return;
+		bgmAudio.pause();
+		bgmAudio.currentTime = 0;
+		bgmAudio = null;
 	}
 
 	function toggleBgm() {
@@ -376,12 +324,8 @@
 	}
 
 	// ボリュームスライダー変更時に即時反映
-	$: if (bgmNodes && audioCtx) {
-		const now = audioCtx.currentTime;
-		try {
-			bgmNodes.master.gain.cancelScheduledValues(now);
-			bgmNodes.master.gain.linearRampToValueAtTime(bgmVolume, now + 0.15);
-		} catch {}
+	$: if (bgmAudio) {
+		bgmAudio.volume = bgmVolume;
 	}
 
 	// レイアウト分岐用: Document PiP 中のみ pipHost が別ウィンドウへ移動するので、
