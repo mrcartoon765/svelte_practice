@@ -41,7 +41,16 @@
 	// 円のスケールアニメ状態（canvas に反映するため）
 	let currentScale = 1;
 	let currentPhase = null;        // { from, to, startMs, durationMs, text }
-	let rafId = null;
+	let canvasIntervalId = null;
+
+	// ---- Web Worker（バックグラウンドでも止まらないタイマー） ----
+	let timerWorker = null;
+
+	// ---- BGM (アンビエントパッドを Web Audio で生成) ----
+	let bgmOn = false;
+	let bgmVolume = 0.3;
+	let audioCtx = null;
+	let bgmNodes = null;            // { master, mod, oscs, lfo, lfoGain }
 
 	onMount(() => {
 		if (typeof window === 'undefined') return;
@@ -50,15 +59,49 @@
 			'pictureInPictureEnabled' in document &&
 			document.pictureInPictureEnabled === true;
 		pipSupported = hasDocPip || hasVideoPip;
+
+		// インライン Worker（setTimeout を Worker 内で実行 → バックグラウンドでも発火する）
+		const code = `
+			const t = {};
+			onmessage = e => {
+				if (e.data.c === 's') {
+					t[e.data.id] = setTimeout(() => { postMessage(e.data.id); delete t[e.data.id]; }, e.data.ms);
+				} else {
+					clearTimeout(t[e.data.id]); delete t[e.data.id];
+				}
+			};
+		`;
+		try {
+			timerWorker = new Worker(URL.createObjectURL(new Blob([code], { type: 'application/javascript' })));
+		} catch { /* Worker が使えない環境は通常 setTimeout にフォールバック */ }
 	});
 
 	onDestroy(() => {
 		if (pipWindow) { try { pipWindow.close(); } catch {} }
-		if (rafId) cancelAnimationFrame(rafId);
+		if (canvasIntervalId) clearInterval(canvasIntervalId);
 		if (pipMode === 'video') {
 			try { document.exitPictureInPicture(); } catch {}
 		}
+		if (timerWorker) { timerWorker.terminate(); timerWorker = null; }
+		stopBgm();
+		if (audioCtx) { try { audioCtx.close(); } catch {} }
 	});
+
+	/** バックグラウンドでも止まらない delay。Worker が使えない場合は通常の setTimeout */
+	function delay(ms) {
+		if (!timerWorker) return new Promise((r) => setTimeout(r, ms));
+		return new Promise((resolve) => {
+			const id = Math.random();
+			const handler = (e) => {
+				if (e.data === id) {
+					timerWorker.removeEventListener('message', handler);
+					resolve();
+				}
+			};
+			timerWorker.addEventListener('message', handler);
+			timerWorker.postMessage({ c: 's', id, ms });
+		});
+	}
 
 	// ---- Canvas 描画 (Video PiP 用) ----
 	function easeInOut(t) {
@@ -110,17 +153,16 @@
 			ctx.font = `600 ${Math.max(14, Math.floor(r * 0.55))}px Arial, sans-serif`;
 			ctx.fillText(txt, cx, cy);
 		}
-
-		rafId = requestAnimationFrame(drawCanvas);
 	}
 
+	/** setInterval ベース（RAF はバックグラウンドで完全停止するため） */
 	function startCanvasLoop() {
-		if (rafId) return;
-		rafId = requestAnimationFrame(drawCanvas);
+		if (canvasIntervalId) return;
+		canvasIntervalId = setInterval(drawCanvas, 33); // ~30fps
 	}
 	function stopCanvasLoop() {
-		if (rafId) cancelAnimationFrame(rafId);
-		rafId = null;
+		if (canvasIntervalId) clearInterval(canvasIntervalId);
+		canvasIntervalId = null;
 	}
 
 	function copyStyles(target) {
@@ -222,7 +264,6 @@
 	}
 
 	async function breeth() {
-		const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 		const updateAndDelay = async (t, scale, time) => {
 			updateDiv(t, scale, time);
 			await delay(time * 1000);
@@ -259,6 +300,88 @@
 
 	function textToggle() {
 		textOnOff = !textOnOff;
+	}
+
+	// ---- BGM ----
+	function ensureAudioCtx() {
+		if (!audioCtx) {
+			const Ctx = window.AudioContext || window.webkitAudioContext;
+			audioCtx = new Ctx();
+		}
+		if (audioCtx.state === 'suspended') audioCtx.resume();
+	}
+
+	function startBgm() {
+		ensureAudioCtx();
+		if (bgmNodes) return;
+
+		const master = audioCtx.createGain();
+		master.gain.value = 0;
+		master.connect(audioCtx.destination);
+		// 2秒かけてフェードイン
+		master.gain.linearRampToValueAtTime(bgmVolume, audioCtx.currentTime + 2);
+
+		// スウェル用モジュレーションゲイン（LFO で音量が呼吸する）
+		const mod = audioCtx.createGain();
+		mod.gain.value = 0.65;
+		mod.connect(master);
+
+		// A マイナー系パッド: A2, E3, A3, E4
+		const freqs = [110, 164.81, 220, 329.63];
+		const oscs = freqs.map((f, i) => {
+			const o = audioCtx.createOscillator();
+			o.type = i === 0 ? 'sine' : 'triangle';
+			o.frequency.value = f;
+			// 微妙にデチューンして広がりを出す
+			o.detune.value = (i - 1.5) * 4;
+			const g = audioCtx.createGain();
+			g.gain.value = i === 0 ? 0.22 : 0.12;
+			o.connect(g).connect(mod);
+			o.start();
+			return o;
+		});
+
+		// LFO (~12 秒周期) で mod.gain を ±0.3 スウェル
+		const lfo = audioCtx.createOscillator();
+		lfo.type = 'sine';
+		lfo.frequency.value = 0.08;
+		const lfoGain = audioCtx.createGain();
+		lfoGain.gain.value = 0.3;
+		lfo.connect(lfoGain).connect(mod.gain);
+		lfo.start();
+
+		bgmNodes = { master, mod, oscs, lfo, lfoGain };
+	}
+
+	function stopBgm() {
+		if (!bgmNodes || !audioCtx) return;
+		const nodes = bgmNodes;
+		bgmNodes = null;
+		const now = audioCtx.currentTime;
+		try {
+			nodes.master.gain.cancelScheduledValues(now);
+			nodes.master.gain.linearRampToValueAtTime(0, now + 1);
+		} catch {}
+		setTimeout(() => {
+			try { nodes.oscs.forEach((o) => o.stop()); } catch {}
+			try { nodes.lfo.stop(); } catch {}
+			try { nodes.master.disconnect(); } catch {}
+		}, 1100);
+	}
+
+	function toggleBgm() {
+		bgmOn = !bgmOn;
+		if (bgmOn) startBgm();
+		else stopBgm();
+	}
+
+	// ボリュームスライダー変更時に即時反映
+	$: if (bgmNodes && audioCtx) {
+		const now = audioCtx.currentTime;
+		try {
+			bgmNodes.master.gain.cancelScheduledValues(now);
+			bgmNodes.master.gain.linearRampToValueAtTime(bgmVolume, now + 0.15);
+		} catch {}
 	}
 
 	// レイアウト分岐用: Document PiP 中のみ pipHost が別ウィンドウへ移動するので、
@@ -343,6 +466,14 @@
 							<input type="color" bind:value={color} class="color-input" />
 						</div>
 
+						<div class="setting-item span-2">
+							<div class="setting-label">
+								<span>BGM 音量</span>
+								<span class="setting-value">{Math.round(bgmVolume * 100)} %</span>
+							</div>
+							<input type="range" min="0" max="1" step="0.01" bind:value={bgmVolume} />
+						</div>
+
 						<div class="setting-item">
 							<div class="setting-label">
 								<span>吸う</span>
@@ -381,6 +512,10 @@
 					<button class="util-btn" on:click={textToggle} aria-pressed={textOnOff}>
 						<span class="dot {textOnOff ? 'on' : 'off'}"></span>
 						{textOnOff ? '文字 ON' : '文字 OFF'}
+					</button>
+					<button class="util-btn" on:click={toggleBgm} aria-pressed={bgmOn}>
+						<span class="dot {bgmOn ? 'on' : 'off'}"></span>
+						{bgmOn ? 'BGM ON' : 'BGM OFF'}
 					</button>
 					{#if pipSupported}
 						<button class="util-btn" on:click={togglePip}>
@@ -543,6 +678,9 @@
 		flex-direction: column;
 		gap: 0.35rem;
 		padding: 0.5rem;
+	}
+	.setting-item.span-2 {
+		grid-column: 1 / -1;
 	}
 	.setting-label {
 		display: flex;
