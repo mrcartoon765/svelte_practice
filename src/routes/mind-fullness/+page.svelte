@@ -3,25 +3,82 @@
 	import { onMount, onDestroy } from 'svelte';
 
 	// Time
-	$: playTime = 1;
+	let playTime = 1;
+	let infinite = false;
 	$: playTimeToMin = playTime * 60 * 1000;
-	$: breathIn = 4;
-	$: stopOne = 4;
-	$: breathOut = 8;
-	$: stopTwo = 4;
+	let breathIn = 4;
+	let stopOne = 4;
+	let breathOut = 8;
+	let stopTwo = 4;
 
 	// Circle color
-	$: color = '#a78bfa'; // violet-400
+	let color = '#a78bfa'; // violet-400
+
+	function complementColor(hex) {
+		const m = /^#?([\da-f]{6})$/i.exec(hex);
+		if (!m) return hex;
+		const n = parseInt(m[1], 16);
+		const r = 255 - ((n >> 16) & 0xff);
+		const g = 255 - ((n >> 8) & 0xff);
+		const b = 255 - (n & 0xff);
+		return '#' + ((r << 16) | (g << 8) | b).toString(16).padStart(6, '0');
+	}
+
+	// 止のフェーズ中だけ補色に切り替え
+	$: displayColor = text === textStop ? complementColor(color) : color;
 
 	// Play state
-	$: play = false;
+	let play = false;
 
 	// Text labels
-	$: textBreathIn = '吸';
-	$: textStop = '止';
-	$: textBreathOut = '吐';
-	$: textOnOff = true;
+	const textBreathIn = '吸';
+	const textStop = '止';
+	const textBreathOut = '吐';
+	let textOnOff = true;
 	let text = '';
+
+	// Countdown / completion UI state
+	let showComplete = false;
+	let completeTimeout = null;
+
+	// Wake Lock
+	let wakeLock = null;
+
+	// Settings persistence
+	const SETTINGS_KEY = 'mindfullness:settings:v1';
+	let settingsLoaded = false;
+
+	// 統計 (継続記録)
+	const STATS_KEY = 'mindfullness:stats:v1';
+	let stats = { totalSeconds: 0, sessions: 0, streakDays: 0, lastDate: '', longestStreak: 0 };
+
+	// セッション進捗 (リングプログレス用)
+	let sessionStartMs = 0;
+	let sessionElapsedMs = 0;
+	let progressIntervalId = null;
+	$: progressPct = playTimeToMin > 0 ? Math.min(100, (sessionElapsedMs / playTimeToMin) * 100) : 0;
+
+	// 呼吸プリセット
+	const presets = [
+		{ id: '4-7-8', label: '4-7-8', breathIn: 4, stopOne: 7, breathOut: 8, stopTwo: 0 },
+		{ id: 'box', label: 'ボックス', breathIn: 4, stopOne: 4, breathOut: 4, stopTwo: 4 },
+		{ id: 'simple', label: 'シンプル', breathIn: 5, stopOne: 0, breathOut: 5, stopTwo: 0 }
+	];
+	$: activePresetId =
+		presets.find(
+			(p) =>
+				p.breathIn === breathIn &&
+				p.stopOne === stopOne &&
+				p.breathOut === breathOut &&
+				p.stopTwo === stopTwo
+		)?.id ?? 'custom';
+
+	function applyPreset(p) {
+		breathIn = p.breathIn;
+		stopOne = p.stopOne;
+		breathOut = p.breathOut;
+		stopTwo = p.stopTwo;
+	}
 
 	// Element refs
 	let div;
@@ -60,6 +117,29 @@
 			document.pictureInPictureEnabled === true;
 		pipSupported = hasDocPip || hasVideoPip;
 
+		// 設定を localStorage から復元
+		try {
+			const raw = localStorage.getItem(SETTINGS_KEY);
+			if (raw) {
+				const s = JSON.parse(raw);
+				if (typeof s.playTime === 'number') playTime = s.playTime;
+				if (typeof s.infinite === 'boolean') infinite = s.infinite;
+				if (typeof s.breathIn === 'number') breathIn = s.breathIn;
+				if (typeof s.stopOne === 'number') stopOne = s.stopOne;
+				if (typeof s.breathOut === 'number') breathOut = s.breathOut;
+				if (typeof s.stopTwo === 'number') stopTwo = s.stopTwo;
+				if (typeof s.color === 'string') color = s.color;
+				if (typeof s.bgmVolume === 'number') bgmVolume = s.bgmVolume;
+				if (typeof s.textOnOff === 'boolean') textOnOff = s.textOnOff;
+			}
+		} catch {}
+		settingsLoaded = true;
+
+		loadStats();
+
+		// バックグラウンド復帰時に Wake Lock を取り直す
+		document.addEventListener('visibilitychange', onVisibilityChange);
+
 		// インライン Worker（setTimeout を Worker 内で実行 → バックグラウンドでも発火する）
 		const code = `
 			const t = {};
@@ -83,8 +163,136 @@
 			try { document.exitPictureInPicture(); } catch {}
 		}
 		if (timerWorker) { timerWorker.terminate(); timerWorker = null; }
+		if (completeTimeout) clearTimeout(completeTimeout);
+		stopProgressLoop();
+		if (typeof document !== 'undefined') {
+			document.removeEventListener('visibilitychange', onVisibilityChange);
+		}
+		releaseWakeLock();
 		stopBgm();
 	});
+
+	// 設定変更を localStorage に書き出す
+	$: if (settingsLoaded && typeof window !== 'undefined') {
+		try {
+			localStorage.setItem(
+				SETTINGS_KEY,
+				JSON.stringify({ playTime, infinite, breathIn, stopOne, breathOut, stopTwo, color, bgmVolume, textOnOff })
+			);
+		} catch {}
+	}
+
+	// ---- Wake Lock (画面スリープ防止) ----
+	async function acquireWakeLock() {
+		if (typeof navigator === 'undefined' || !('wakeLock' in navigator)) return;
+		try {
+			wakeLock = await navigator.wakeLock.request('screen');
+			wakeLock.addEventListener?.('release', () => { wakeLock = null; });
+		} catch {}
+	}
+	function releaseWakeLock() {
+		if (!wakeLock) return;
+		try { wakeLock.release(); } catch {}
+		wakeLock = null;
+	}
+	function onVisibilityChange() {
+		if (document.visibilityState === 'visible' && play && !wakeLock) {
+			acquireWakeLock();
+		}
+	}
+
+	// ---- 終了チャイム (チーン: 鈴/ベル風) ----
+	function playEndChime() {
+		if (typeof window === 'undefined') return;
+		const AC = window.AudioContext || window.webkitAudioContext;
+		if (!AC) return;
+		try {
+			const ctx = new AC();
+			const tone = (freq, duration, peak) => {
+				const osc = ctx.createOscillator();
+				const gain = ctx.createGain();
+				osc.type = 'sine';
+				osc.frequency.value = freq;
+				osc.connect(gain);
+				gain.connect(ctx.destination);
+				const t0 = ctx.currentTime;
+				gain.gain.setValueAtTime(0, t0);
+				gain.gain.linearRampToValueAtTime(peak, t0 + 0.005); // 鋭いアタック
+				gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duration); // 長い減衰
+				osc.start(t0);
+				osc.stop(t0 + duration + 0.05);
+			};
+			// 基音 + わずかに不協和な倍音で金属的な「チーン」
+			tone(1760, 3.8, 0.28);  // A6 基音
+			tone(2637, 2.2, 0.10);  // 5 度倍音 (短めに減衰)
+			tone(3520, 1.4, 0.06);  // オクターブ (キラッとした輝き)
+			setTimeout(() => { try { ctx.close(); } catch {} }, 4500);
+		} catch {}
+	}
+
+	function showCompletion() {
+		showComplete = true;
+		if (completeTimeout) clearTimeout(completeTimeout);
+		completeTimeout = setTimeout(() => { showComplete = false; }, 4000);
+	}
+
+	// ---- 統計 (継続記録) ----
+	function loadStats() {
+		try {
+			const raw = localStorage.getItem(STATS_KEY);
+			if (raw) {
+				const s = JSON.parse(raw);
+				stats = { ...stats, ...s };
+			}
+		} catch {}
+	}
+
+	function todayStr() {
+		const d = new Date();
+		return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+	}
+
+	function dayDiff(a, b) {
+		const [y1, m1, d1] = a.split('-').map(Number);
+		const [y2, m2, d2] = b.split('-').map(Number);
+		const da = new Date(y1, m1 - 1, d1).getTime();
+		const db = new Date(y2, m2 - 1, d2).getTime();
+		return Math.round((db - da) / (24 * 60 * 60 * 1000));
+	}
+
+	function recordSession(elapsedSeconds) {
+		if (!Number.isFinite(elapsedSeconds) || elapsedSeconds < 60) return;
+		const today = todayStr();
+		let newStreak = stats.streakDays || 0;
+		if (!stats.lastDate) {
+			newStreak = 1;
+		} else if (stats.lastDate === today) {
+			newStreak = Math.max(newStreak, 1);
+		} else {
+			const diff = dayDiff(stats.lastDate, today);
+			newStreak = diff === 1 ? newStreak + 1 : 1;
+		}
+		stats = {
+			totalSeconds: (stats.totalSeconds || 0) + Math.round(elapsedSeconds),
+			sessions: (stats.sessions || 0) + 1,
+			streakDays: newStreak,
+			lastDate: today,
+			longestStreak: Math.max(stats.longestStreak || 0, newStreak)
+		};
+		try { localStorage.setItem(STATS_KEY, JSON.stringify(stats)); } catch {}
+	}
+
+	// ---- 進捗ループ ----
+	function startProgressLoop() {
+		if (progressIntervalId) return;
+		progressIntervalId = setInterval(() => {
+			sessionElapsedMs = Date.now() - sessionStartMs;
+		}, 200);
+	}
+	function stopProgressLoop() {
+		if (progressIntervalId) clearInterval(progressIntervalId);
+		progressIntervalId = null;
+	}
 
 	/** バックグラウンドでも止まらない delay。Worker が使えない場合は通常の setTimeout */
 	function delay(ms) {
@@ -139,7 +347,7 @@
 		ctx.shadowBlur = 40;
 		ctx.beginPath();
 		ctx.arc(cx, cy, r, 0, Math.PI * 2);
-		ctx.fillStyle = color;
+		ctx.fillStyle = displayColor;
 		ctx.fill();
 		ctx.restore();
 
@@ -274,27 +482,93 @@
 		if (await updateAndDelay(textStop, 0.5, stopTwo)) return;
 	}
 
+	async function runCountdown() {
+		for (let i = 3; i >= 1; i--) {
+			if (!play) return false;
+			updateDiv(String(i), 1.2, 0.3);
+			await delay(1000);
+		}
+		return play;
+	}
+
 	async function repeat() {
 		play = true;
-		const stat = new Date().getTime();
+		showComplete = false;
+		acquireWakeLock();
+
+		const ok = await runCountdown();
+		if (!ok) { updateDiv('', 1, 0); return; }
+
+		sessionStartMs = Date.now();
+		sessionElapsedMs = 0;
+		startProgressLoop();
+
 		while (play) {
 			await breeth();
-			const end = new Date().getTime();
-			if (playTimeToMin <= end - stat || !play) {
-				repeatStop();
+			if (!play) break;
+			if (infinite) continue;
+			if (playTimeToMin <= Date.now() - sessionStartMs) {
+				finishNaturally();
 				break;
 			}
 		}
 	}
 
-	function repeatStop() {
+	function finishNaturally() {
+		const elapsed = sessionStartMs ? (Date.now() - sessionStartMs) / 1000 : 0;
 		play = false;
 		updateDiv('', 1, 0);
+		releaseWakeLock();
+		stopProgressLoop();
+		playEndChime();
+		showCompletion();
+		recordSession(elapsed);
+	}
+
+	function repeatStop() {
+		const elapsed = sessionStartMs ? (Date.now() - sessionStartMs) / 1000 : 0;
+		play = false;
+		updateDiv('', 1, 0);
+		releaseWakeLock();
+		stopProgressLoop();
+		recordSession(elapsed);
 	}
 
 	function togglePlay() {
 		if (play) repeatStop();
 		else repeat();
+	}
+
+	// ---- シェア ----
+	let shareToast = '';
+	let shareToastTimeout = null;
+	async function share() {
+		const url = typeof window !== 'undefined' ? window.location.href : '';
+		const data = {
+			title: 'Mindfull Breathing',
+			text: 'ゆったり呼吸を整えよう',
+			url
+		};
+		try {
+			if (typeof navigator !== 'undefined' && navigator.share) {
+				await navigator.share(data);
+				return;
+			}
+			if (typeof navigator !== 'undefined' && navigator.clipboard) {
+				await navigator.clipboard.writeText(url);
+				flashShareToast('リンクをコピーしました');
+				return;
+			}
+			flashShareToast(url);
+		} catch (e) {
+			if (e && e.name === 'AbortError') return;
+			flashShareToast('シェアに失敗しました');
+		}
+	}
+	function flashShareToast(msg) {
+		shareToast = msg;
+		if (shareToastTimeout) clearTimeout(shareToastTimeout);
+		shareToastTimeout = setTimeout(() => { shareToast = ''; }, 2500);
 	}
 
 	function textToggle() {
@@ -357,15 +631,45 @@
 	{#if !docPipActive}
 		<h1 class="page-title">Mindfull Breathing</h1>
 		<p class="page-sub">ゆったり呼吸を整えよう</p>
+		{#if stats.sessions > 0}
+			<div class="stats-row" aria-label="継続記録">
+				<div class="stat">
+					<div class="stat-num">{stats.streakDays}</div>
+					<div class="stat-lbl">連続日数</div>
+				</div>
+				<div class="stat">
+					<div class="stat-num">{Math.round((stats.totalSeconds || 0) / 60)}</div>
+					<div class="stat-lbl">累計分</div>
+				</div>
+				<div class="stat">
+					<div class="stat-num">{stats.sessions}</div>
+					<div class="stat-lbl">セッション</div>
+				</div>
+			</div>
+		{/if}
 	{/if}
 
 	<div class="pip-slot" bind:this={pipSlot}>
 		<div bind:this={pipHost} class:pip={docPipActive}>
 			<!-- 円：stage で最大スケール分のスペースを確保 -->
 			<div class="circle-stage {docPipActive ? 'stage-sm' : 'stage-lg'}">
+				{#if play && !infinite}
+					<svg class="progress-ring" viewBox="0 0 100 100" aria-hidden="true">
+						<circle class="progress-track" cx="50" cy="50" r="48" pathLength="100" />
+						<circle
+							class="progress-fill"
+							cx="50"
+							cy="50"
+							r="48"
+							pathLength="100"
+							stroke-dasharray="{progressPct} {100 - progressPct}"
+							transform="rotate(-90 50 50)"
+						/>
+					</svg>
+				{/if}
 				<div
 					class="circle {docPipActive ? 'circle-sm' : 'circle-lg'}"
-					style="background: {color};"
+					style="background: {displayColor};"
 					bind:this={div}
 				>
 					{#if textOnOff}
@@ -393,13 +697,39 @@
 				</div>
 
 				{#if !play}
+					<div class="presets">
+						<span class="presets-label">プリセット</span>
+						<div class="preset-chips">
+							{#each presets as p}
+								<button
+									type="button"
+									class="preset-chip {activePresetId === p.id ? 'is-active' : ''}"
+									on:click={() => applyPreset(p)}
+								>
+									{p.label}
+									<span class="preset-detail">{p.breathIn}-{p.stopOne}-{p.breathOut}-{p.stopTwo}</span>
+								</button>
+							{/each}
+							{#if activePresetId === 'custom'}
+								<span class="preset-chip is-custom">カスタム</span>
+							{/if}
+						</div>
+					</div>
 					<div class="settings">
 						<div class="setting-item">
 							<div class="setting-label">
 								<span>時間</span>
-								<span class="setting-value">{playTime} 分</span>
+								<span class="setting-value">{infinite ? '無制限' : `${playTime} 分`}</span>
 							</div>
-							<input type="range" min="1" max="90" bind:value={playTime} />
+							<input type="range" min="1" max="180" bind:value={playTime} disabled={infinite} />
+							<button
+								class="infinite-toggle {infinite ? 'is-on' : ''}"
+								on:click={() => (infinite = !infinite)}
+								aria-pressed={infinite}
+								type="button"
+							>
+								∞ 無制限
+							</button>
 						</div>
 
 						<div class="setting-item">
@@ -467,6 +797,29 @@
 						</button>
 					{/if}
 				</div>
+
+				<div class="share-row">
+					<button class="share-btn" on:click={share} aria-label="シェア">
+						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+							<circle cx="18" cy="5" r="3"></circle>
+							<circle cx="6" cy="12" r="3"></circle>
+							<circle cx="18" cy="19" r="3"></circle>
+							<line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line>
+							<line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
+						</svg>
+						シェア
+					</button>
+					{#if shareToast}
+						<span class="share-toast">{shareToast}</span>
+					{/if}
+				</div>
+			{/if}
+
+			{#if showComplete}
+				<div class="complete-toast" role="status">
+					<div class="complete-title">お疲れさまでした</div>
+					<div class="complete-sub">{playTime} 分の瞑想を完了しました</div>
+				</div>
 			{/if}
 		</div>
 	</div>
@@ -525,6 +878,7 @@
 
 	/* 円 stage: 最大スケール(2x)のぶんの領域を予約してレイアウト崩れを防ぐ */
 	.circle-stage {
+		position: relative;
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -693,6 +1047,34 @@
 		cursor: pointer;
 		border: 2px solid #ede9fe;
 	}
+	.setting-item input[type='range']:disabled {
+		opacity: 0.35;
+		cursor: not-allowed;
+	}
+
+	.infinite-toggle {
+		margin-top: 0.4rem;
+		align-self: flex-start;
+		padding: 0.25rem 0.7rem;
+		font-size: 0.7rem;
+		font-weight: 500;
+		letter-spacing: 0.05em;
+		color: rgba(237, 233, 254, 0.85);
+		background: rgba(255, 255, 255, 0.06);
+		border: 1px solid rgba(255, 255, 255, 0.18);
+		border-radius: 9999px;
+		cursor: pointer;
+		transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+	}
+	.infinite-toggle:hover {
+		background: rgba(255, 255, 255, 0.12);
+		border-color: rgba(255, 255, 255, 0.3);
+	}
+	.infinite-toggle.is-on {
+		background: linear-gradient(135deg, rgba(167, 139, 250, 0.6), rgba(139, 92, 246, 0.6));
+		border-color: rgba(196, 181, 253, 0.7);
+		color: #fff;
+	}
 
 	/* 下段ユーティリティ行 */
 	.utility-row {
@@ -774,5 +1156,180 @@
 	}
 	.btn-pip {
 		background: linear-gradient(135deg, #8b5cf6, #6d28d9);
+	}
+
+	/* シェア */
+	.share-row {
+		margin-top: 1.25rem;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.5rem;
+	}
+	.share-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.45rem;
+		padding: 0.55rem 1.25rem;
+		font-size: 0.85rem;
+		font-weight: 500;
+		letter-spacing: 0.05em;
+		color: #ede9fe;
+		background: rgba(255, 255, 255, 0.08);
+		border: 1px solid rgba(255, 255, 255, 0.18);
+		border-radius: 9999px;
+		cursor: pointer;
+		transition: background 0.2s ease, border-color 0.2s ease, transform 0.1s ease;
+	}
+	.share-btn:hover {
+		background: rgba(255, 255, 255, 0.14);
+		border-color: rgba(255, 255, 255, 0.3);
+	}
+	.share-btn:active {
+		transform: translateY(1px);
+	}
+	.share-toast {
+		font-size: 0.75rem;
+		color: #c4b5fd;
+		background: rgba(255, 255, 255, 0.08);
+		border: 1px solid rgba(255, 255, 255, 0.15);
+		padding: 0.3rem 0.7rem;
+		border-radius: 9999px;
+	}
+
+	/* 完了トースト */
+	.complete-toast {
+		margin-top: 1.5rem;
+		padding: 1rem 1.5rem;
+		text-align: center;
+		background: rgba(255, 255, 255, 0.08);
+		border: 1px solid rgba(196, 181, 253, 0.4);
+		border-radius: 1rem;
+		backdrop-filter: blur(8px);
+		animation: fadeIn 0.4s ease;
+	}
+	.complete-title {
+		font-size: 1.1rem;
+		font-weight: 500;
+		letter-spacing: 0.08em;
+		color: #ede9fe;
+	}
+	.complete-sub {
+		margin-top: 0.25rem;
+		font-size: 0.8rem;
+		color: rgba(237, 233, 254, 0.7);
+	}
+	@keyframes fadeIn {
+		from { opacity: 0; transform: translateY(6px); }
+		to { opacity: 1; transform: translateY(0); }
+	}
+
+	/* 統計バッジ */
+	.stats-row {
+		display: flex;
+		gap: 1.25rem;
+		margin: 0.5rem 0 0;
+		padding: 0.4rem 0.9rem;
+		background: rgba(255, 255, 255, 0.05);
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		border-radius: 9999px;
+	}
+	.stat {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		min-width: 3rem;
+	}
+	.stat-num {
+		font-size: 1.05rem;
+		font-weight: 600;
+		color: #ede9fe;
+		font-variant-numeric: tabular-nums;
+		line-height: 1.1;
+	}
+	.stat-lbl {
+		font-size: 0.65rem;
+		color: rgba(237, 233, 254, 0.65);
+		letter-spacing: 0.05em;
+		margin-top: 0.1rem;
+	}
+
+	/* プリセット */
+	.presets {
+		width: 100%;
+		max-width: 28rem;
+		margin-top: 1.5rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+	.presets-label {
+		font-size: 0.7rem;
+		color: rgba(237, 233, 254, 0.6);
+		letter-spacing: 0.08em;
+		padding-left: 0.25rem;
+	}
+	.preset-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem;
+	}
+	.preset-chip {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 0.4rem;
+		padding: 0.35rem 0.75rem;
+		font-size: 0.78rem;
+		font-weight: 500;
+		letter-spacing: 0.04em;
+		color: rgba(237, 233, 254, 0.85);
+		background: rgba(255, 255, 255, 0.06);
+		border: 1px solid rgba(255, 255, 255, 0.15);
+		border-radius: 9999px;
+		cursor: pointer;
+		transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+	}
+	.preset-chip:hover {
+		background: rgba(255, 255, 255, 0.12);
+	}
+	.preset-chip.is-active {
+		background: linear-gradient(135deg, rgba(167, 139, 250, 0.55), rgba(139, 92, 246, 0.55));
+		border-color: rgba(196, 181, 253, 0.7);
+		color: #fff;
+	}
+	.preset-chip.is-custom {
+		font-style: italic;
+		color: rgba(237, 233, 254, 0.55);
+		cursor: default;
+	}
+	.preset-detail {
+		font-size: 0.65rem;
+		color: rgba(237, 233, 254, 0.55);
+		font-variant-numeric: tabular-nums;
+	}
+	.preset-chip.is-active .preset-detail {
+		color: rgba(255, 255, 255, 0.75);
+	}
+
+	/* リングプログレス */
+	.progress-ring {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		pointer-events: none;
+	}
+	.progress-track {
+		fill: none;
+		stroke: rgba(255, 255, 255, 0.08);
+		stroke-width: 1.2;
+	}
+	.progress-fill {
+		fill: none;
+		stroke: rgba(196, 181, 253, 0.8);
+		stroke-width: 1.5;
+		stroke-linecap: round;
+		filter: drop-shadow(0 0 3px rgba(196, 181, 253, 0.5));
+		transition: stroke-dasharray 0.25s linear;
 	}
 </style>
